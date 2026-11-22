@@ -323,6 +323,41 @@ function dueSm2(today){return DATA.filter(c=>{const sm=S.sm2[c.i];return sm&&sm.
 /* ---------- session player ---------- */
 let Q=null; // {key, cards:[], idx, done, t0}
 function chunkPass(iv){return iv>=14?4:iv>=6?3:iv>=3?2:1}
+// 交错混排：首轮按顺序认识新词，之后每个新词在本次学习内再出现2次（第2、3轮），
+// 穿插在其余新词之间；只有某词最后一次出现才计入评分（stage==='final'）。
+function interleaveCards(list){
+  const N=list.length;
+  // 轮次间隔：第2次出现推后BATCH个，第3次再推后BATCH个。BATCH随规模自适应。
+  const BATCH=Math.max(3,Math.round(N/12));  // 74词→6；先学6个再回头考
+  const queue=[];
+  // 每个词3次出现：stage 0=初识(给答案) 1=回忆 2=终考(记分)
+  const pending=list.map((c,i)=>({c,nextAt:i,stage:0,seq:i}));
+  let order=[...pending];
+  // 用事件驱动：维护一个按 nextAt 排序的堆式列表
+  const out=[];
+  const remaining=new Map(); // seq -> 剩余出现次数
+  pending.forEach(p=>remaining.set(p.seq,[0,1,2]));
+  // 用简单的优先队列模拟 (规模小，直接排序)
+  const pq=[...pending.map(p=>({...p}))];
+  const appears=new Map(); // seq -> 已出现次数
+  pending.forEach(p=>appears.set(p.seq,0));
+  let clock=0;
+  while(pq.length){
+    pq.sort((a,b)=>a.nextAt-b.nextAt||a.seq-b.seq);
+    const cur=pq.shift();
+    const n=appears.get(cur.seq);
+    const isFinal=(n===2);
+    out.push({c:cur.c,pass:0,skim:false,round:n+1,last:isFinal,seq:cur.seq});
+    appears.set(cur.seq,n+1);
+    if(n<2){  // 还要再出现
+      cur.nextAt=clock+BATCH;
+      cur.stage=n+1;
+      pq.push(cur);
+    }
+    clock++;
+  }
+  return out;
+}
 function buildCards(list,pass,onlyMarked,skimUnmarked){
   const chunks=BYLIST[list]||[];
   const marked=chunks.filter(c=>['tri','cir'].includes(mark(c.i)));
@@ -339,7 +374,7 @@ function startSession(key){
   let cards=[],title='';
   if(key==='am'){
     if(!nl){alert(T('No new list today','今天没有新学任务'));return}
-    cards=BYLIST[nl].map(c=>({c,pass:0,skim:false}));
+    cards=interleaveCards(BYLIST[nl]);
     title=T(`Morning · New List ${nl}`,`早 · 初记 List ${nl}`);
   }else if(key==='noon'){
     if(!nl){alert(T('No quick review today','今天没有快过任务'));return}
@@ -366,10 +401,11 @@ function startSession(key){
 }
 function renderCard(){
   if(Q.idx>=Q.cards.length)return finishSession();
-  const {c,pass,skim}=Q.cards[Q.idx];
-  const revealed=Q.ans[Q.idx]!==null;
+  const {c,pass,skim,round,last,seq}=Q.cards[Q.idx];
+  const revealed=Q.ans[Q.idx]!==null||round===1;   // 第1遍直接给答案（初识）
   let inner='';
-  const meta=`<div class="meta"><span>List ${c.l} · ${Q.idx+1}/${Q.cards.length}</span><span>${c.s?'★'.repeat(Math.min(c.s,5)):''}</span></div>
+  const roundTag=round?` · ${T('pass ','第')}${round}/3${T('','遍')}`:'';
+  const meta=`<div class="meta"><span>List ${c.l} · ${Q.idx+1}/${Q.cards.length}${roundTag}</span><span>${c.s?'★'.repeat(Math.min(c.s,5)):''}</span></div>
   <div class="pbar"><i style="width:${(Q.idx/Q.cards.length*100).toFixed(1)}%"></i></div>`;
   if(!revealed){
     if(pass===3){
@@ -386,11 +422,13 @@ function renderCard(){
     <div class="btnrow"><button class="big b-pri" data-a="reveal">${T('Reveal · Space','揭示（空格）')}</button><button class="spk" data-a="speakList">Play</button></div></div>`;
     }
   }else{
-    const gradeBtns=skim
-      ?`<div class="seg seg2" id="seg"><div class="thumb" id="segThumb"></div><button data-a="mark" data-l="1">${T('Mark △','△ 不熟')}</button><button data-a="next" id="segNext">${T('Next','下一条 →')}</button></div>`
-      :(pass===4
-        ?`<div class="btnrow"><button class="big b-pri" data-a="next">${T('Next','下一条 →')}</button></div>`
-        :`<div class="seg" id="seg"><div class="thumb" id="segThumb"></div><button data-a="grade" data-l="1">${T('Again','不认识')}</button><button data-a="grade" data-l="2">${T('Hard','模糊')}</button><button data-a="grade" data-l="3">${T('Good','认识')}</button></div>`);
+    const gradeBtns = round && round<3
+      ? `<div class="btnrow"><button class="big b-pri" data-a="next">${T('Next','下一条 →')}</button></div>`
+      : (skim
+        ?`<div class="seg seg2" id="seg"><div class="thumb" id="segThumb"></div><button data-a="mark" data-l="1">${T('Mark △','△ 不熟')}</button><button data-a="next" id="segNext">${T('Next','下一条 →')}</button></div>`
+        :(pass===4
+          ?`<div class="btnrow"><button class="big b-pri" data-a="next">${T('Next','下一条 →')}</button></div>`
+          :`<div class="seg" id="seg"><div class="thumb" id="segThumb"></div><button data-a="grade" data-l="1">${T('Again','不认识')}</button><button data-a="grade" data-l="2">${T('Hard','模糊')}</button><button data-a="grade" data-l="3">${T('Good','认识')}</button></div>`));
     let depth='';
     if(pass>=1&&c.se&&c.se.length){const s1=c.se[0];depth+=`<div class="def">${hlChunk(s1.e||'',c.w)}${s1.z?` <span class="small">（${esc(s1.z)}${s1.p?' '+esc(s1.p):''}）</span>`:''}</div>`}
     if(pass>=2){
@@ -418,7 +456,8 @@ function quizOpts(c){
 }
 app.addEventListener('click',e=>{
   const t=e.target.closest('[data-a],[data-q]');if(!t||!Q)return;
-  const a=t.dataset.a,q=t.dataset.q,{c,pass,skim}=Q.cards[Q.idx];
+  const a=t.dataset.a,q=t.dataset.q,card=Q.cards[Q.idx],c=card.c,pass=card.pass,skim=card.skim;
+  const isFinal=!(card.round&&card.round<3);   // 交错模式：非最后一轮不记分
   if(a==='quit'){Q=null;NAV='home';render();return}
   if(a==='speakList'){speak(c.ce);return}
   if(a==='reveal'){Q.ans[Q.idx]={};renderCard();if(S.set.tts)speak(c.ce);return}
@@ -431,10 +470,10 @@ app.addEventListener('click',e=>{
       thumb.style.transform=`translateX(${idx*100}%)`;
       btns.forEach((b,i)=>b.classList.toggle('on',i===idx));
       const lvl=+t.dataset.l;
-      setTimeout(()=>{if(a==='grade'){grade(c.i,lvl);Q.ans[Q.idx].lvl=lvl}else{if(mark(c.i)!=='cir')S.marks[c.i]='tri';save()}next()},900);
+      setTimeout(()=>{if(a==='grade'&&isFinal){grade(c.i,lvl);Q.ans[Q.idx].lvl=lvl}else if(a==='mark'){if(mark(c.i)!=='cir')S.marks[c.i]='tri';save()}next()},900);
       return;
     }
-    if(a==='grade'){grade(c.i,+t.dataset.l);Q.ans[Q.idx].lvl=+t.dataset.l}else{if(mark(c.i)!=='cir')S.marks[c.i]='tri';save()}
+    if(a==='grade'){if(isFinal){grade(c.i,+t.dataset.l);Q.ans[Q.idx].lvl=+t.dataset.l}}else{if(mark(c.i)!=='cir')S.marks[c.i]='tri';save()}
     next();return;
   }
   if(a==='next'){next();}
